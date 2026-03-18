@@ -77,6 +77,10 @@ def parse_args() -> Namespace:
     p.add_argument("--rank", type=int, default=160)
     p.add_argument("--chunk_size", type=int, default=8)
     p.add_argument("--minference", action='store_true', default=False)
+    p.add_argument("--enable_thinking", action='store_true', default=False, help="Enable Qwen3 thinking mode")
+    p.add_argument("--sparse_budget_ratio", type=float, default=None,
+                   help="Set sparse_budget as a ratio of input length (e.g., 0.02 = 2%%). "
+                        "Overrides --sparse_budget. Budget is rounded to chunk_size multiple.")
 
     return p.parse_args()
 
@@ -100,21 +104,27 @@ if __name__ == '__main__':
     from models import choose_model_class
     from data.dataset import Dataset
     
-    evaluator = Evaluator(dist_config)
+    evaluator = Evaluator(dist_config, args=args)
     
     if dist_config.master_process:
         print(colored(f"data_names: {dataset_names}", 'cyan'))
     
     LLM = choose_model_class(model_name)
 
-    llm = LLM(model_name=model_name, batch_size=batch_size, device=dist_config.device, max_length=datalen+2048, attn_mode=args.method, dtype=dtype, sparse_budget=sparse_budget, rank=rank, chunk_size=chunk_size, minference=minference)
+    extra_kwargs = {}
+    if 'qwen3' in model_name.lower():
+        extra_kwargs['enable_thinking'] = args.enable_thinking
+    # max_length: datalen * 2 for thinking mode (input + generation), datalen + 2048 otherwise
+    max_length = datalen * 2 if args.enable_thinking else datalen + 2048
+    llm = LLM(model_name=model_name, batch_size=batch_size, device=dist_config.device, max_length=max_length, attn_mode=args.method, dtype=dtype, sparse_budget=sparse_budget, rank=rank, chunk_size=chunk_size, minference=minference, **extra_kwargs)
 
     if dist_config.master_process:
         llm.print_kv_stats()
 
     for dataset_name in dataset_names:
-        dataset = Dataset(dataset_name, llm.tokenizer, datalen, num_samples, evaluator.dist_config.rank, evaluator.dist_config.world_size)
-        evaluator.test(llm, dataset, f"archive/{model_name.split('/')[-1]}/{dataset_name}_{datalen}_{args.method}_{sparse_budget}_{rank}_{chunk_size}.jsonl", args.method)
+        dataset = Dataset(dataset_name, llm.tokenizer, datalen, num_samples, evaluator.dist_config.rank, evaluator.dist_config.world_size, enable_thinking=args.enable_thinking)
+        budget_label = f"ratio{args.sparse_budget_ratio}" if args.sparse_budget_ratio else str(sparse_budget)
+        evaluator.test(llm, dataset, f"archive/{model_name.split('/')[-1]}/{dataset_name}_{datalen}_{args.method}_{budget_label}_{rank}_{chunk_size}.jsonl", args.method, sparse_budget_ratio=args.sparse_budget_ratio)
     
     del llm
     gc.collect()

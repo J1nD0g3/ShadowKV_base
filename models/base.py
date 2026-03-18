@@ -35,14 +35,32 @@ class LLM:
         return f"LLM: {self.model_name}, attn_mode: {self.attn_mode}, max_length: {self.max_length}, batch_size: {self.batch_size}, device: {self.device}, dtype: {self.dtype}, GPU mem: {gpu_mem}"
 
     def init_kv_cache(self, sparse_budget: int, rank: int, chunk_size: int, config):
+        self._kv_rank = rank
+        self._kv_chunk_size = chunk_size
+        self._kv_config = config
+        self._kv_sparse_budget = int(sparse_budget)
+        self._rebuild_kv_cache(int(sparse_budget))
+
+    def _rebuild_kv_cache(self, sparse_budget: int):
         if self.attn_mode == 'full':
-            self.kv_cache = KV_Cache(config, max_length=self.max_length, device=self.device, dtype=self.dtype, batch_size=self.batch_size)
+            self.kv_cache = KV_Cache(self._kv_config, max_length=self.max_length, device=self.device, dtype=self.dtype, batch_size=self.batch_size)
         elif self.attn_mode.lower() == 'shadowkv':
-            self.kv_cache = ShadowKVCache(config, max_length=self.max_length, device=self.device, dtype=self.dtype, batch_size=self.batch_size, sparse_budget=sparse_budget, rank=rank, chunk_size=chunk_size)
+            self.kv_cache = ShadowKVCache(self._kv_config, max_length=self.max_length, device=self.device, dtype=self.dtype, batch_size=self.batch_size, sparse_budget=sparse_budget, rank=self._kv_rank, chunk_size=self._kv_chunk_size)
         elif self.attn_mode.lower() == 'shadowkv_cpu':
-            self.kv_cache = ShadowKVCache_CPU(config, max_length=self.max_length, device=self.device, dtype=self.dtype, batch_size=self.batch_size, sparse_budget=sparse_budget, rank=rank, chunk_size=chunk_size)
+            self.kv_cache = ShadowKVCache_CPU(self._kv_config, max_length=self.max_length, device=self.device, dtype=self.dtype, batch_size=self.batch_size, sparse_budget=sparse_budget, rank=self._kv_rank, chunk_size=self._kv_chunk_size)
         else:
             raise ValueError(f"Invalid attention mode {self.attn_mode}")
+
+    def reinit_kv_cache_with_budget(self, sparse_budget: int):
+        """Reinitialize KV cache with a new sparse_budget (must be divisible by chunk_size)."""
+        chunk_size = self._kv_chunk_size
+        # Round to nearest multiple of chunk_size (at least chunk_size)
+        sparse_budget = max(chunk_size, (sparse_budget // chunk_size) * chunk_size)
+        if hasattr(self, 'kv_cache'):
+            del self.kv_cache
+            gc.collect()
+            torch.cuda.empty_cache()
+        self._rebuild_kv_cache(sparse_budget)
 
     def print_kv_stats(self):
         self.kv_cache.print_stats()

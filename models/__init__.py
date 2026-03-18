@@ -18,6 +18,7 @@
 from .glm import GLM
 from .llama import Llama
 from .qwen import Qwen2
+from .qwen3 import Qwen3
 from .phi3 import Phi3
 
 def choose_model_class(model_name):
@@ -27,6 +28,8 @@ def choose_model_class(model_name):
         return GLM
     elif 'yi' in model_name.lower():
         return Llama
+    elif 'qwen3' in model_name.lower():
+        return Qwen3
     elif 'qwen' in model_name.lower():
         return Qwen2
     elif 'phi' in model_name.lower():

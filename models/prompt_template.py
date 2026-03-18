@@ -23,6 +23,8 @@ Templates = {
     'glm': "<|system|>\nYou are a helpful assistant\n<|user|> \n{ctx}<|assistant|>\n",
     'lwm': "You are a helpful assistant.\nUSER: {ctx}\nASSISTANT: Answer: ",
     'qwen': "<|im_start|>system\nYou are a helpful assistant<|im_end|>\n<|im_start|>user\n{ctx}<|im_end|>\n<|im_start|>assistant\n",
+    'qwen3': "<|im_start|>system\nYou are a helpful assistant<|im_end|>\n<|im_start|>user\n{ctx}<|im_end|>\n<|im_start|>assistant\n",
+    'qwen3_thinking': "<|im_start|>system\nYou are a helpful assistant<|im_end|>\n<|im_start|>user\n{ctx}<|im_end|>\n<|im_start|>assistant\n<think>\n",
     'phi': "<|system|>\nYou are a helpful assistant<|end|>\n<|user|>\n{ctx}<|end|>\n<|assistant|>\n",
 }
 
@@ -33,6 +35,8 @@ Chat_Templates = {
     'glm': "<|user|>\n{msg}<|assistant|>\n",
     'lwm': "\nUSER: {msg}\nASSISTANT: ",
     'qwen': "<|im_start|>user\n{msg}<|im_end|>\n<|im_start|>assistant\n",
+    'qwen3': "<|im_start|>user\n{msg}<|im_end|>\n<|im_start|>assistant\n",
+    'qwen3_thinking': "<|im_start|>user\n{msg}<|im_end|>\n<|im_start|>assistant\n<think>\n",
     'phi': "<|user|>\n{msg}<|end|>\n<|assistant|>\n",
 }
 

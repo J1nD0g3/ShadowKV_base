@@ -4,3 +4,4 @@ build/
 *.pyc
 *.so
 *.jsonl
+logs/
