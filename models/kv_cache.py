@@ -181,6 +181,8 @@ class ShadowKVCache:
         self.kv_offset = 0
         self.prefill = 0
         self.gen_offset = 0
+        self.sparse_end = 0
+        self.sparse_start = 0
 
         self.k_landmark = None
         self.k_landmark_idx = None
@@ -432,6 +434,8 @@ class ShadowKVCache_CPU:
         self.kv_offset = 0
         self.prefill = 0
         self.gen_offset = 0
+        self.sparse_end = 0
+        self.sparse_start = 0
 
         self.k_landmark = None
         self.k_landmark_idx = None

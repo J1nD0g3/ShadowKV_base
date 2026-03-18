@@ -105,7 +105,7 @@ class Evaluator:
         if self.dist_config.is_distributed:
             dist.barrier()
 
-        progress_bar = tqdm(range(dataset.num_samples // bsz), desc=f'Running {dataset.dataset_name}', disable=self.dist_config.is_distributed and not self.dist_config.master_process)
+        progress_bar = tqdm(range(dataset.num_samples // bsz), desc=f'Running {dataset.dataset_name}', disable=self.dist_config.is_distributed and not self.dist_config.master_process, ascii=' ░▒█')
         for i in range(dataset.num_samples // bsz):
             prompt = torch.cat([dataset.tokenized_prompts[i*bsz+j] for j in range(bsz)], dim=0)
             input_len = prompt.size(1)
@@ -186,12 +186,13 @@ class Evaluator:
             detail.update(kv_info)
             sample_details.append(detail)
 
-            progress_bar.update(1)
             avg_score = sum(scores) / len(scores)
-            postfix = {'avg_score': avg_score}
+            postfix_str = f"avg={avg_score:.2f}"
             if dataset.dataset_name == 'math500' and math_verify_scores:
-                postfix['math_verify'] = sum(math_verify_scores) / len(math_verify_scores)
-            progress_bar.set_postfix(postfix)
+                mv = sum(math_verify_scores) / len(math_verify_scores)
+                postfix_str += f", mv={mv:.2f}"
+            progress_bar.set_postfix_str(postfix_str, refresh=False)
+            progress_bar.update(1)
 
             if dataset.dataset_name == 'niah':
                 preds = {
