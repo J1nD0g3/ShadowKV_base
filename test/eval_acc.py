@@ -81,6 +81,8 @@ def parse_args() -> Namespace:
     p.add_argument("--sparse_budget_ratio", type=float, default=None,
                    help="Set sparse_budget as a ratio of input length (e.g., 0.02 = 2%%). "
                         "Overrides --sparse_budget. Budget is rounded to chunk_size multiple.")
+    p.add_argument("--disable_chat_template", action='store_true', default=False,
+                   help="Skip chat template application (useful for code completion tasks)")
 
     return p.parse_args()
 
@@ -122,7 +124,7 @@ if __name__ == '__main__':
         llm.print_kv_stats()
 
     for dataset_name in dataset_names:
-        dataset = Dataset(dataset_name, llm.tokenizer, datalen, num_samples, evaluator.dist_config.rank, evaluator.dist_config.world_size, enable_thinking=args.enable_thinking)
+        dataset = Dataset(dataset_name, llm.tokenizer, datalen, num_samples, evaluator.dist_config.rank, evaluator.dist_config.world_size, enable_thinking=args.enable_thinking, disable_chat_template=args.disable_chat_template)
         budget_label = f"ratio{args.sparse_budget_ratio}" if args.sparse_budget_ratio else str(sparse_budget)
         evaluator.test(llm, dataset, f"archive/{model_name.split('/')[-1]}/{dataset_name}_{datalen}_{args.method}_{budget_label}_{rank}_{chunk_size}.jsonl", args.method, sparse_budget_ratio=args.sparse_budget_ratio)
     

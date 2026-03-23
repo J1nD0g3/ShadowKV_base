@@ -126,12 +126,13 @@ Solution:
 """
 
 class Dataset:
-    def __init__(self, dataset_name, tokenizer, datalen, num_samples, rank=0, world_size=1, enable_thinking=False):
+    def __init__(self, dataset_name, tokenizer, datalen, num_samples, rank=0, world_size=1, enable_thinking=False, disable_chat_template=False):
         self.dataset_name = dataset_name
         self.tokenizer = tokenizer
         self.datalen = datalen
         self.num_samples = num_samples
         self.rank = rank
+        self.disable_chat_template = disable_chat_template
         self.world_size = world_size
         self.is_sharded = False
         self.all_classes = []  # For LongBench classification tasks
@@ -154,6 +155,8 @@ class Dataset:
         The generate() method handles thinking mode separately.
         For other models: use prompt_template.py Templates.
         """
+        if self.disable_chat_template:
+            return self.tokenizer.encode(prompt_text, return_tensors="pt", add_special_tokens=False)
         model_name = self.tokenizer.name_or_path.lower()
         if 'qwen3' in model_name:
             messages = [{"role": "user", "content": prompt_text}]

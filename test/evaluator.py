@@ -51,6 +51,16 @@ class TeeWriter:
     def close(self):
         self.file.close()
 
+    def isatty(self):
+        return False
+
+    def fileno(self):
+        return self.stream.fileno()
+
+    @property
+    def encoding(self):
+        return getattr(self.stream, 'encoding', 'utf-8')
+
 
 class Evaluator:
     def __init__(self, dist_config, args=None):
@@ -105,7 +115,7 @@ class Evaluator:
         if self.dist_config.is_distributed:
             dist.barrier()
 
-        progress_bar = tqdm(range(dataset.num_samples // bsz), desc=f'Running {dataset.dataset_name}', disable=self.dist_config.is_distributed and not self.dist_config.master_process, ascii=' ░▒█')
+        progress_bar = tqdm(range(dataset.num_samples // bsz), desc=f'Running {dataset.dataset_name}', disable=self.dist_config.is_distributed and not self.dist_config.master_process, ascii=' ░▒█', ncols=120)
         for i in range(dataset.num_samples // bsz):
             prompt = torch.cat([dataset.tokenized_prompts[i*bsz+j] for j in range(bsz)], dim=0)
             input_len = prompt.size(1)
@@ -114,7 +124,12 @@ class Evaluator:
             gen_len = max(gen_len, 1)  # at least 1 token
 
             if sparse_budget_ratio is not None:
-                new_budget = int(input_len * sparse_budget_ratio)
+                total_budget = int(input_len * sparse_budget_ratio)
+                # Subtract outlier and local tokens so the total KV matches the ratio
+                kv = llm.kv_cache
+                outlier_tokens = getattr(kv, 'outlier_chunk', 0) * getattr(kv, 'chunk_size', 1)
+                local_tokens = getattr(kv, 'local_chunk', 0) * getattr(kv, 'chunk_size', 1)
+                new_budget = max(total_budget - outlier_tokens - local_tokens, getattr(kv, 'chunk_size', 8))
                 llm.reinit_kv_cache_with_budget(new_budget)
 
             if 'persona' in dataset.dataset_name:
@@ -165,7 +180,12 @@ class Evaluator:
             if hasattr(llm, 'kv_cache'):
                 kv = llm.kv_cache
                 if hasattr(kv, 'sparse_budget'):
+                    outlier_tokens = getattr(kv, 'outlier_chunk', 0) * getattr(kv, 'chunk_size', 1)
+                    local_tokens = getattr(kv, 'local_chunk', 0) * getattr(kv, 'chunk_size', 1)
                     kv_info['sparse_budget'] = kv.sparse_budget
+                    kv_info['total_kv_budget'] = kv.sparse_budget + outlier_tokens + local_tokens
+                    kv_info['outlier_chunk'] = getattr(kv, 'outlier_chunk', 0)
+                    kv_info['local_chunk'] = getattr(kv, 'local_chunk', 0)
                     kv_info['select_sets'] = getattr(kv, 'select_sets', None)
                     kv_info['chunk_size'] = getattr(kv, 'chunk_size', None)
 
@@ -294,6 +314,7 @@ class Evaluator:
                 'raw_gen_len': detail.get('raw_gen_len'),
                 'output_len': detail.get('output_len'),
                 'kv_budget': detail.get('sparse_budget'),
+                'total_kv_budget': detail.get('total_kv_budget'),
                 'select_sets': detail.get('select_sets'),
             }
             if idx < len(jsonl_data):
@@ -396,7 +417,26 @@ class Evaluator:
         lines.append("--- KV Cache ---")
         lines.append(f"{'Sparse budget:':<20s} {args.sparse_budget if args else 'N/A'}")
         if args and args.sparse_budget_ratio:
-            lines.append(f"{'Budget ratio:':<20s} {args.sparse_budget_ratio}")
+            lines.append(f"{'Total KV ratio:':<20s} {args.sparse_budget_ratio}")
+            # Compute effective sparse-only ratio from recorded details
+            _pre_details = next((s.get('_sample_details', []) for s in self.all_stats if s.get('_sample_details')), [])
+            if _pre_details:
+                _pre_d = _pre_details[0]
+                _cs = _pre_d.get('chunk_size', args.chunk_size if args else 8)
+                _overhead = _pre_d.get('outlier_chunk', 0) * _cs + _pre_d.get('local_chunk', 0) * _cs
+                _sparse_ratios = [d['sparse_budget'] / d['input_len'] for d in _pre_details if d.get('sparse_budget') and d.get('input_len', 0) > 0]
+                if _sparse_ratios:
+                    lines.append(f"{'Sparse-only ratio:':<20s} {sum(_sparse_ratios)/len(_sparse_ratios):.4f} (excl. outlier+local {_overhead} tokens)")
+        # Get outlier/local info from recorded sample details
+        _first_details = next((s.get('_sample_details', []) for s in self.all_stats if s.get('_sample_details')), [])
+        _first_detail = _first_details[0] if _first_details else {}
+        chunk_size = _first_detail.get('chunk_size', args.chunk_size if args else 8)
+        outlier_chunk = _first_detail.get('outlier_chunk', 0)
+        local_chunk = _first_detail.get('local_chunk', 0)
+        outlier_tokens = outlier_chunk * chunk_size
+        local_tokens = local_chunk * chunk_size
+        lines.append(f"{'Outlier tokens:':<20s} {outlier_tokens} ({outlier_chunk} chunks x {chunk_size})")
+        lines.append(f"{'Local tokens:':<20s} {local_tokens} ({local_chunk} chunks x {chunk_size})")
         lines.append(f"{'Rank:':<20s} {args.rank if args else 'N/A'}")
         lines.append(f"{'Chunk size:':<20s} {args.chunk_size if args else 'N/A'}")
         lines.append("")
@@ -415,55 +455,134 @@ class Evaluator:
         lines.append("--- Results ---")
         lines.append("")
 
-        def _get_metric_name(ds_name):
-            if ds_name.startswith('longbench/'):
-                task = ds_name.split('/')[-1]
-                qa_tasks = ['hotpotqa', '2wikimqa', 'musique', 'multifieldqa_en', 'multifieldqa_zh']
-                summ_tasks = ['gov_report', 'multi_news', 'qmsum', 'vcsum']
-                code_tasks = ['lcc', 'repobench-p']
-                count_tasks = ['passage_count']
-                retrieval_tasks = ['passage_retrieval_en', 'passage_retrieval_zh']
-                classify_tasks = ['trec', 'triviaqa', 'samsum']
-                if task in qa_tasks:
-                    return 'qa_f1_score'
-                elif task in summ_tasks:
-                    return 'rouge_score'
-                elif task in code_tasks:
-                    return 'code_sim_score'
-                elif task in count_tasks:
-                    return 'count_score'
-                elif task in retrieval_tasks:
-                    return 'retrieval_score'
-                elif task in classify_tasks:
-                    return 'classification_score'
-                return 'score'
-            elif ds_name == 'math500':
+        # LongBench task groups and metric definitions
+        LONGBENCH_GROUPS = {
+            'Single-Document QA': {
+                'tasks': ['narrativeqa', 'qasper', 'multifieldqa_en', 'multifieldqa_zh'],
+                'metrics': {
+                    'narrativeqa': 'qa_f1_score',
+                    'qasper': 'qa_f1_score',
+                    'multifieldqa_en': 'qa_f1_score',
+                    'multifieldqa_zh': 'qa_f1_zh_score',
+                },
+            },
+            'Multi-Document QA': {
+                'tasks': ['hotpotqa', '2wikimqa', 'musique', 'dureader'],
+                'metrics': {
+                    'hotpotqa': 'qa_f1_score',
+                    '2wikimqa': 'qa_f1_score',
+                    'musique': 'qa_f1_score',
+                    'dureader': 'rouge_zh_score',
+                },
+            },
+            'Summarization': {
+                'tasks': ['gov_report', 'qmsum', 'multi_news', 'vcsum'],
+                'metrics': {
+                    'gov_report': 'rouge_score',
+                    'qmsum': 'rouge_score',
+                    'multi_news': 'rouge_score',
+                    'vcsum': 'rouge_zh_score',
+                },
+            },
+            'Few-shot Learning': {
+                'tasks': ['trec', 'triviaqa', 'samsum', 'lsht'],
+                'metrics': {
+                    'trec': 'classification_score',
+                    'triviaqa': 'qa_f1_score',
+                    'samsum': 'rouge_score',
+                    'lsht': 'classification_score',
+                },
+            },
+            'Synthetic Tasks': {
+                'tasks': ['passage_count', 'passage_retrieval_en', 'passage_retrieval_zh'],
+                'metrics': {
+                    'passage_count': 'count_score',
+                    'passage_retrieval_en': 'retrieval_score',
+                    'passage_retrieval_zh': 'retrieval_zh_score',
+                },
+            },
+            'Code Completion': {
+                'tasks': ['lcc', 'repobench-p'],
+                'metrics': {
+                    'lcc': 'code_sim_score',
+                    'repobench-p': 'code_sim_score',
+                },
+            },
+        }
+
+        def _get_metric_name(task_short, groups=LONGBENCH_GROUPS):
+            for gname, ginfo in groups.items():
+                if task_short in ginfo['metrics']:
+                    return ginfo['metrics'][task_short]
+            if task_short == 'math500':
                 return 'exact_match'
             return 'score'
 
-        header = f"|{'Tasks':^40s}|{'Metric':^20s}|   |{'Value':^7s}|   |{'Stderr':^7s}|"
-        lines.append(header)
-        lines.append(f"|{'-'*40}|{'-'*20}|---|{'-'*7}|---|{'-'*7}|")
-
-        all_scores_flat = []
-        for stat in self.all_stats:
-            ds = stat['dataset']
-            score = stat.get(setting_key, 0)
-            metric_name = _get_metric_name(ds)
-            sample_scores = stat.get('_sample_scores', [])
-
-            all_scores_flat.extend(sample_scores)
+        def _compute_stderr(sample_scores):
             n = len(sample_scores)
             if n > 1:
                 mean_s = sum(sample_scores) / n
                 var = sum((x - mean_s) ** 2 for x in sample_scores) / (n - 1)
-                stderr = math.sqrt(var / n)
-            else:
-                stderr = 0.0
+                return math.sqrt(var / n)
+            return 0.0
 
-            ds_label = ds.replace('longbench/', 'longbench_')
-            lines.append(f"| - {ds_label:<37s}|{metric_name:<20s}| \u2191 |{score:.4f} | \u00b1 |{stderr:.4f}|")
+        # Build lookup: task_short -> stat
+        stat_by_task = {}
+        for stat in self.all_stats:
+            ds = stat['dataset']
+            task_short = ds.split('/')[-1] if '/' in ds else ds
+            stat_by_task[task_short] = stat
 
+        header = f"|{'Tasks':^40s}|{'n-shot':>6s}|{'Metric':^20s}|   |{'Value':^7s}|   |{'Stderr':^7s}|"
+        lines.append(header)
+        lines.append(f"|{'-'*40}|{'-'*6}:|{'-'*20}|---|{'-'*7}:|---|{'-'*7}:|")
+
+        group_summaries = []
+        all_scores_flat = []
+
+        for group_name, group_info in LONGBENCH_GROUPS.items():
+            group_scores = []
+            group_stderrs = []
+            group_task_lines = []
+
+            for task in group_info['tasks']:
+                if task not in stat_by_task:
+                    continue
+                stat = stat_by_task[task]
+                score = stat.get(setting_key, 0)
+                metric_name = group_info['metrics'].get(task, 'score')
+                sample_scores = stat.get('_sample_scores', [])
+                stderr = _compute_stderr(sample_scores)
+
+                all_scores_flat.extend(sample_scores)
+                group_scores.append(score)
+                group_stderrs.append(stderr)
+
+                ds_label = f"longbench_{task}"
+                group_task_lines.append(
+                    f"| - {ds_label:<37s}|{0:>6d}|{metric_name:<20s}| ↑ |{score:.4f}| ± |{stderr:.4f}|"
+                )
+
+            if not group_scores:
+                continue
+
+            # Group average and pooled stderr
+            group_avg = sum(group_scores) / len(group_scores)
+            group_avg_stderr = sum(group_stderrs) / len(group_stderrs)
+            group_summaries.append((group_name, group_avg, group_avg_stderr))
+
+            # Group header line
+            lines.append(f"|{'- ' + group_name:<40s}|{'':>6s}|{'score':<20s}| ↑ |{group_avg:.4f}| ± |{group_avg_stderr:.4f}|")
+            for tl in group_task_lines:
+                lines.append(tl)
+
+        lines.append("")
+
+        # Groups summary table
+        lines.append(f"|{'Groups':^26s}|{'Metric':^8s}|   |{'Value':^7s}|   |{'Stderr':^7s}|")
+        lines.append(f"|{'-'*26}|{'-'*8}|---|{'-'*7}:|---|{'-'*7}:|")
+        for gname, gavg, gstderr in group_summaries:
+            lines.append(f"|{'- ' + gname:<26s}|{'score':<8s}| ↑ |{gavg:.4f}| ± |{gstderr:.4f}|")
         lines.append("")
 
         # Average
@@ -486,6 +605,7 @@ class Evaluator:
             output_lens = [d.get('output_len', 0) for d in details]
             raw_gens = [d.get('raw_gen_len', 0) for d in details if d.get('raw_gen_len') is not None]
             kv_budgets = [d.get('sparse_budget', 0) for d in details if d.get('sparse_budget') is not None]
+            total_kv_budgets = [d.get('total_kv_budget', 0) for d in details if d.get('total_kv_budget') is not None]
             sel_sets_list = [d.get('select_sets', 0) for d in details if d.get('select_sets') is not None]
 
             def _fmt_stat(vals):
@@ -510,6 +630,9 @@ class Evaluator:
             if kv_budgets:
                 parts.append(f"selected_kv={_fmt_stat(kv_budgets)}")
                 parts.append(f"ratio={_fmt_ratio(kv_budgets, input_lens)}")
+            if total_kv_budgets:
+                parts.append(f"total_kv={_fmt_stat(total_kv_budgets)}")
+                parts.append(f"total_ratio={_fmt_ratio(total_kv_budgets, input_lens)}")
             if sel_sets_list:
                 parts.append(f"select_sets={_fmt_stat(sel_sets_list)}")
 

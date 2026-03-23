@@ -144,7 +144,7 @@ class LLM:
 
         elif isinstance(self.kv_cache, ShadowKVCache) or isinstance(self.kv_cache, ShadowKVCache_CPU):
 
-            if q_len > 4*1024 or self.kv_cache.k_landmark is None: # prefill
+            if q_len > 4*1024: # prefill
                 # svd unrope key and save
                 self.kv_cache.get_svd(key_states, layer_idx=layer_idx)
                 query_states, key_states = self.apply_rotary_pos_emb(query_states, key_states, position_ids)
@@ -155,30 +155,38 @@ class LLM:
                 else:
                     hidden_states = flash_attn_with_kvcache(q=query_states.transpose(1, 2), k_cache=key_states.transpose(1, 2), v_cache=value_states.transpose(1, 2), causal=True)
 
-            else: # decode
-                # rope query and key
+            elif self.kv_cache.k_landmark is None and q_len > 1: # short prefill: skip ShadowKV, use full attention
+                query_states, key_states = self.apply_rotary_pos_emb(query_states, key_states, position_ids)
+                self.kv_cache.prefill_kv_cache_full(value_states, layer_idx, key_states)
+                hidden_states = flash_attn_with_kvcache(q=query_states.transpose(1, 2), k_cache=key_states.transpose(1, 2), v_cache=value_states.transpose(1, 2), causal=True)
+
+            else: # decode (q_len == 1)
                 query_states, key_states = self.apply_rotary_pos_emb(query_states, key_states, position_ids)
 
                 # update kv cache to buffer
                 self.kv_cache.update_kv_cache(key_states, value_states, layer_idx)
 
-                # get retrieval idx
-                position_ids = self.kv_cache.get_retrieval_position_ids(layer_idx=layer_idx, query_states=query_states)
+                if self.kv_cache.k_landmark is not None:
+                    # ShadowKV decode: sparse retrieval
+                    position_ids = self.kv_cache.get_retrieval_position_ids(layer_idx=layer_idx, query_states=query_states)
 
-                # multi-stream
-                curr_stream = torch.cuda.current_stream()
-                get_value_stream = self.kv_cache.copy_stream
+                    curr_stream = torch.cuda.current_stream()
+                    get_value_stream = self.kv_cache.copy_stream
 
-                with torch.cuda.stream(get_value_stream):
-                    get_value_stream.wait_stream(curr_stream)
-                    value_states = self.kv_cache.get_value_cache(layer_idx, position_ids)
+                    with torch.cuda.stream(get_value_stream):
+                        get_value_stream.wait_stream(curr_stream)
+                        value_states = self.kv_cache.get_value_cache(layer_idx, position_ids)
 
-                # gather key cache from GPU and RoPE it (should be hide by CPU offloading time)
-                key_states = self.kv_cache.get_key_cache(layer_idx=layer_idx, position_ids=position_ids, rope_func=self.apply_rotary_pos_emb_single, cos_sin_cache=self.cos_sin_cache)
+                    key_states = self.kv_cache.get_key_cache(layer_idx=layer_idx, position_ids=position_ids, rope_func=self.apply_rotary_pos_emb_single, cos_sin_cache=self.cos_sin_cache)
 
-                curr_stream.wait_stream(get_value_stream)
+                    curr_stream.wait_stream(get_value_stream)
+                else:
+                    # Full attention decode: use entire buffer
+                    gen_offset = self.kv_cache.gen_offset if layer_idx == self.num_layers - 1 else self.kv_cache.gen_offset + 1
+                    kv_len = self.kv_cache.sparse_end + gen_offset
+                    key_states = self.kv_cache.k_cache_buffer[layer_idx][:, :, :kv_len]
+                    value_states = self.kv_cache.v_cache_buffer[layer_idx][:, :, :kv_len]
 
-                # flash attention
                 hidden_states = flash_attn_with_kvcache(q=query_states.transpose(1, 2), k_cache=key_states.transpose(1, 2), v_cache=value_states.transpose(1, 2), causal=True)
 
         else:

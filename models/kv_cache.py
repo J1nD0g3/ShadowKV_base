@@ -349,6 +349,22 @@ class ShadowKVCache:
             self.kv_offset += incoming
             self.gen_offset += incoming
 
+    def prefill_kv_cache_full(self,
+            new_v_cache: torch.Tensor,
+            layer_idx: int,
+            key_states_roped: torch.Tensor,
+            ):
+        """For short inputs (< 4096 tokens): store full KV without ShadowKV compression."""
+        incoming = new_v_cache.shape[-2]
+        self.prefill = incoming
+        self.k_cache_buffer[layer_idx][:, :, :incoming].copy_(key_states_roped)
+        self.v_cache_buffer[layer_idx][:, :, :incoming].copy_(new_v_cache)
+        self.sparse_end = incoming
+        self.sparse_start = incoming  # no sparse region
+
+        if layer_idx == self.num_layers - 1:
+            self.kv_offset = incoming
+
     def clear(self):
         self.k_cache_buffer.zero_()
         self.v_cache_buffer.zero_()
@@ -362,7 +378,9 @@ class ShadowKVCache:
         self.prefill = 0
         self.gen_offset = 0
         self.prefill_local = 0
-    
+        self.sparse_end = 0
+        self.sparse_start = 0
+
     def H2D(self):
         pass
 
