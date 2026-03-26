@@ -22,7 +22,7 @@ import numpy as np
 
 # RULER
 from .metrics import needle_score, string_match_part, multi_number, multi_words
-from .metrics import longbench_metric, math_exact_match
+from .metrics import longbench_metric, math_exact_match, infinitebench_metric
 
 # NIAH
 from data.utils import generate_random_number, read_context_files, create_contexts, NIAH_TEMPLATE, RANDOM_NEEDLE_CITIES
@@ -82,6 +82,33 @@ LONGBENCH_GEN_LEN = {
     'trec': 64, 'triviaqa': 32, 'samsum': 128, 'lsht': 64,
     'passage_count': 32, 'passage_retrieval_en': 32, 'passage_retrieval_zh': 32,
     'lcc': 64, 'repobench-p': 64,
+}
+
+# InfiniteBench prompt templates (yarn_mistral style for open-source models)
+INFINITEBENCH_PROMPTS = {
+    "passkey": "There is an important info hidden inside a lot of irrelevant text. Find it and memorize it. I will quiz you about the important information.\n\n{context}\n\n{input}\n\nThe pass key is",
+    "number_string": "There is an important info hidden inside a lot of irrelevant text. Find it. I will quiz you about the important information there.\n\n{context}\n\n{input}\n\nThe sequence of digits is",
+    "kv_retrieval": "Extract the value corresponding to the specified key in the JSON object below.\n\n{context}\n\n{input}",
+    "longbook_sum_eng": "Summarize the book below.\n\n{context}\n\nSummary:",
+    "longbook_choice_eng": "Read the book and answer the question.\n\n{context}\n\nQuestion: {question}\nA. {OPTION_A}\nB. {OPTION_B}\nC. {OPTION_C}\nD. {OPTION_D}\n\nThe letter of the correct answer is",
+    "longbook_qa_eng": "Read the book and answer the question. Be very concise in your answer.\n\n{context}\n\nQuestion: {question}\nAnswer:",
+    "longbook_qa_chn": "阅读以下书籍然后回答问题。\n\n{context}\n\n问题：{question}\n答案：",
+    "math_find": "{prefix}\n\n{context}\n\n{input}",
+    "code_debug": "Following is a Python code where exactly one of the functions/methods has a deliberate error that makes it crash.\n\n{context}\n\nOptions:\nA. {OPTION_A}\nB. {OPTION_B}\nC. {OPTION_C}\nD. {OPTION_D}\n\nThe correct option is:",
+    "longdialogue_qa_eng": "Below is a dialogue script where one random occurrence of a character name is replaced with \"$$MASK$$\", and you should try to guess who that character is.\n\n{context}\n\nThe name that has been replaced with $$MASK$$ is likely",
+}
+
+INFINITEBENCH_GEN_LEN = {
+    "passkey": 30,
+    "number_string": 50,
+    "kv_retrieval": 50,
+    "longbook_sum_eng": 1200,
+    "longbook_choice_eng": 40,
+    "longbook_qa_eng": 40,
+    "longbook_qa_chn": 40,
+    "longdialogue_qa_eng": 40,
+    "math_find": 30,
+    "code_debug": 30,
 }
 
 # MATH500 few-shot prompt (4-shot, same as minerva_math)
@@ -213,7 +240,10 @@ class Dataset:
         # Base gen_len per dataset (without thinking budget).
         # When enable_thinking, evaluator dynamically caps gen_len to
         # max_length - input_len, giving the model remaining capacity.
-        if self.dataset_name.startswith('longbench/'):
+        if self.dataset_name.startswith('infinitebench/'):
+            task = self.dataset_name.split('/')[-1]
+            base = INFINITEBENCH_GEN_LEN.get(task, 40)
+        elif self.dataset_name.startswith('longbench/'):
             task = self.dataset_name.split('/')[-1]
             base = LONGBENCH_GEN_LEN.get(task, 64)
         elif self.dataset_name == 'math500':
@@ -244,7 +274,12 @@ class Dataset:
         return self.tokenized_prompts[idx], self.gt[idx]
 
     def get_metric(self):
-        if self.dataset_name.startswith('longbench/'):
+        if self.dataset_name.startswith('infinitebench/'):
+            task = self.dataset_name.split('/')[-1]
+            def _ib_metric(pred, gt, all_classes=None):
+                return infinitebench_metric(pred, gt, task)
+            return _ib_metric
+        elif self.dataset_name.startswith('longbench/'):
             task = self.dataset_name.split('/')[-1]
             # Return a lambda that captures the task name
             def _lb_metric(pred, gt, all_classes=None):
@@ -270,7 +305,7 @@ class Dataset:
     def get_dataset(self):
         if 'ruler' in self.dataset_name: # ruler/xxx
             task = self.dataset_name.split('/')[-1]
-            assert self.datalen in [8*1024, 16*1024, 32*1024, 64*1024, 128*1024, 256*1024], "Only support datalen of 16k, 32k, 64k, 128k"
+            assert self.datalen in [8*1024, 16*1024, 32*1024, 64*1024, 100*1024, 128*1024, 256*1024], "Only support datalen of 16k, 32k, 64k, 100k, 128k"
 
             if 'llama-3' in self.tokenizer.name_or_path.lower():
                 model_dir = 'llama-3'
@@ -385,6 +420,149 @@ class Dataset:
             
             return tokenized_prompts, gt, ctx_len, depth_pct
 
+        elif self.dataset_name.startswith('infinitebench/'):  # infinitebench/passkey, infinitebench/longbook_qa_eng, etc.
+            import re as _re
+            task = self.dataset_name.split('/')[-1]
+            assert task in INFINITEBENCH_PROMPTS, f"Unknown InfiniteBench task: {task}. Available: {list(INFINITEBENCH_PROMPTS.keys())}"
+
+            dataset = load_dataset("json", data_files=f'/home/jheo/data/InfiniteBench/{task}.jsonl', split='train')
+            if self.num_samples > 0:
+                self.num_samples = min(self.num_samples, len(dataset))
+            else:
+                self.num_samples = len(dataset)
+
+            tokenized_prompts = []
+            gt = []
+            template = INFINITEBENCH_PROMPTS[task]
+
+            for i in range(self.num_samples):
+                sample = dataset[i]
+                context = sample['context']
+
+                # Build prompt based on task type
+                if task == 'code_debug':
+                    prompt_text = template.format(
+                        context=context,
+                        OPTION_A=sample['options'][0],
+                        OPTION_B=sample['options'][1],
+                        OPTION_C=sample['options'][2],
+                        OPTION_D=sample['options'][3],
+                    )
+                elif task == 'longbook_choice_eng':
+                    prompt_text = template.format(
+                        context=context,
+                        question=sample['input'],
+                        OPTION_A=sample['options'][0],
+                        OPTION_B=sample['options'][1],
+                        OPTION_C=sample['options'][2],
+                        OPTION_D=sample['options'][3],
+                    )
+                elif task in ('longbook_qa_eng', 'longbook_qa_chn'):
+                    prompt_text = template.format(
+                        context=context,
+                        question=sample['input'],
+                    )
+                elif task == 'longbook_sum_eng':
+                    prompt_text = template.format(context=context)
+                elif task == 'longdialogue_qa_eng':
+                    prompt_text = template.format(context=context)
+                elif task == 'math_find':
+                    prompt = sample['input']
+                    find_result = _re.findall(r"The .+ of", prompt)
+                    assert find_result, f"Cannot find target number in: {prompt}"
+                    target_number = find_result[0].lower()[:-3]
+                    prefix = f"What is {target_number} in the following list?"
+                    prompt_text = template.format(
+                        prefix=prefix,
+                        context=context,
+                        input=prompt,
+                    )
+                else:
+                    # passkey, number_string, kv_retrieval
+                    prompt_text = template.format(
+                        context=context,
+                        input=sample['input'],
+                    )
+
+                # Tokenize and apply middle truncation if needed
+                input_ids = self._apply_chat_template(prompt_text)
+                if input_ids.size(1) > self.datalen:
+                    # Middle truncation: keep first half + last half of context
+                    # Measure overhead (template + question tokens)
+                    if task in ('longbook_qa_eng', 'longbook_qa_chn'):
+                        empty_prompt = template.format(context='', question=sample['input'])
+                    elif task == 'longbook_choice_eng':
+                        empty_prompt = template.format(
+                            context='', question=sample['input'],
+                            OPTION_A=sample['options'][0], OPTION_B=sample['options'][1],
+                            OPTION_C=sample['options'][2], OPTION_D=sample['options'][3],
+                        )
+                    elif task == 'code_debug':
+                        empty_prompt = template.format(
+                            context='',
+                            OPTION_A=sample['options'][0], OPTION_B=sample['options'][1],
+                            OPTION_C=sample['options'][2], OPTION_D=sample['options'][3],
+                        )
+                    elif task == 'math_find':
+                        empty_prompt = template.format(prefix=prefix, context='', input=sample['input'])
+                    elif task in ('longbook_sum_eng', 'longdialogue_qa_eng'):
+                        empty_prompt = template.format(context='')
+                    else:
+                        empty_prompt = template.format(context='', input=sample['input'])
+
+                    overhead_ids = self._apply_chat_template(empty_prompt)
+                    max_ctx_tokens = self.datalen - overhead_ids.size(1)
+                    ctx_ids = self.tokenizer.encode(context, add_special_tokens=False)
+                    if len(ctx_ids) > max_ctx_tokens:
+                        half = max_ctx_tokens // 2
+                        ctx_ids = ctx_ids[:half] + ctx_ids[-half:]
+                    truncated_ctx = self.tokenizer.decode(ctx_ids, skip_special_tokens=False)
+
+                    # Rebuild prompt with truncated context
+                    if task == 'code_debug':
+                        prompt_text = template.format(
+                            context=truncated_ctx,
+                            OPTION_A=sample['options'][0], OPTION_B=sample['options'][1],
+                            OPTION_C=sample['options'][2], OPTION_D=sample['options'][3],
+                        )
+                    elif task == 'longbook_choice_eng':
+                        prompt_text = template.format(
+                            context=truncated_ctx, question=sample['input'],
+                            OPTION_A=sample['options'][0], OPTION_B=sample['options'][1],
+                            OPTION_C=sample['options'][2], OPTION_D=sample['options'][3],
+                        )
+                    elif task in ('longbook_qa_eng', 'longbook_qa_chn'):
+                        prompt_text = template.format(context=truncated_ctx, question=sample['input'])
+                    elif task in ('longbook_sum_eng', 'longdialogue_qa_eng'):
+                        prompt_text = template.format(context=truncated_ctx)
+                    elif task == 'math_find':
+                        prompt_text = template.format(prefix=prefix, context=truncated_ctx, input=sample['input'])
+                    else:
+                        prompt_text = template.format(context=truncated_ctx, input=sample['input'])
+                    input_ids = self._apply_chat_template(prompt_text)
+
+                tokenized_prompts.append(input_ids)
+
+                # Get ground truth
+                if task in ('code_debug', 'longbook_choice_eng'):
+                    OPTIONS = "ABCD"
+                    answer = sample['answer']
+                    if isinstance(answer, str):
+                        gt.append([answer, OPTIONS[sample['options'].index(answer)]])
+                    elif isinstance(answer, list):
+                        if len(answer) == 1:
+                            gt.append([answer[0], OPTIONS[sample['options'].index(answer[0])]])
+                        elif len(answer) == 2 and answer[1] in ['A', 'B', 'C', 'D']:
+                            gt.append(answer)
+                        else:
+                            gt.append(answer)
+                    else:
+                        gt.append(answer)
+                else:
+                    gt.append(sample['answer'])
+
+            return tokenized_prompts, gt
+
         elif self.dataset_name.startswith('longbench/'):  # longbench/hotpotqa, longbench/narrativeqa, etc.
             task = self.dataset_name.split('/')[-1]
             assert task in LONGBENCH_PROMPTS, f"Unknown LongBench task: {task}. Available: {list(LONGBENCH_PROMPTS.keys())}"
@@ -444,4 +622,4 @@ class Dataset:
             return tokenized_prompts, gt
 
         else:
-            raise ValueError(f"Dataset {self.dataset_name} not found, please choose from: ruler/*, niah, longbench/*, math500")
+            raise ValueError(f"Dataset {self.dataset_name} not found, please choose from: ruler/*, niah, longbench/*, infinitebench/*, math500")

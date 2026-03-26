@@ -36,7 +36,20 @@ from pathlib import Path
 from tqdm import tqdm
 import random
 import wonderwords
-from nemo.collections.asr.parts.utils.manifest_utils import read_manifest, write_manifest
+try:
+    from nemo.collections.asr.parts.utils.manifest_utils import read_manifest, write_manifest
+except ImportError:
+    def read_manifest(filepath):
+        data = []
+        with open(filepath, 'r') as f:
+            for line in f:
+                data.append(json.loads(line.strip()))
+        return data
+
+    def write_manifest(filepath, data):
+        with open(filepath, 'w') as f:
+            for item in data:
+                f.write(json.dumps(item, ensure_ascii=False) + '\n')
 import sys
 sys.path.append(os.path.join(os.path.dirname(os.path.abspath(__file__)), "..")) 
 from tokenizer import select_tokenizer

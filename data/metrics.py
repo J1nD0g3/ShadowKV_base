@@ -330,6 +330,93 @@ def math_exact_match(prediction, ground_truth):
     return 0.0
 
 
+# ============================================================
+# InfiniteBench metrics
+# ============================================================
+
+def infinitebench_metric(prediction, ground_truth, task_name):
+    """Unified InfiniteBench metric dispatcher."""
+    prediction = postprocess_pred(prediction).strip()
+
+    if task_name in ('passkey', 'number_string', 'kv_retrieval'):
+        # Exact substring match
+        answer = str(ground_truth).strip()
+        return 1.0 if answer in prediction else 0.0
+
+    elif task_name == 'longbook_qa_eng':
+        # F1 score
+        gts = ground_truth if isinstance(ground_truth, list) else [ground_truth]
+        best = 0.0
+        for gt in gts:
+            pred_tokens = normalize_answer(prediction).split()
+            gt_tokens = normalize_answer(gt).split()
+            if pred_tokens and gt_tokens:
+                best = max(best, _f1_score(pred_tokens, gt_tokens))
+        return best
+
+    elif task_name == 'longbook_qa_chn':
+        # Chinese F1 score with jieba
+        try:
+            import jieba
+        except ImportError:
+            return 0.0
+        gts = ground_truth if isinstance(ground_truth, list) else [ground_truth]
+        cn_punc = "！？｡。＂＃＄％＆＇（）＊＋，－／：；＜＝＞＠［＼］＾＿｀｛｜｝～｟｠｢｣､、〃》「」『』【】〔〕〖〗〘〙〚〛〜〝〞〟〰〾〿–—''‛""„‟…‧﹏."
+        all_punc = set(string.punctuation + cn_punc)
+        def _norm_zh(s):
+            return "".join(ch for ch in s.lower() if ch not in all_punc).replace(" ", "")
+
+        best = 0.0
+        for gt in gts:
+            pred_tokens = [_norm_zh(t) for t in jieba.cut(prediction, cut_all=False)]
+            gt_tokens = [_norm_zh(t) for t in jieba.cut(gt, cut_all=False)]
+            pred_tokens = [t for t in pred_tokens if t]
+            gt_tokens = [t for t in gt_tokens if t]
+            if pred_tokens and gt_tokens:
+                best = max(best, _f1_score(pred_tokens, gt_tokens))
+        return best
+
+    elif task_name in ('longbook_choice_eng', 'code_debug'):
+        # Multiple choice: check A/B/C/D
+        answer = ground_truth
+        if isinstance(answer, list):
+            correct_letter = answer[1] if len(answer) > 1 else answer[0]
+            correct_text = answer[0]
+        else:
+            correct_letter = answer
+            correct_text = answer
+        pred_upper = prediction.upper().strip()
+        if correct_letter.upper() in pred_upper[:5]:
+            return 1.0
+        if correct_text.lower() in prediction.lower():
+            return 1.0
+        return 0.0
+
+    elif task_name == 'longbook_sum_eng':
+        # ROUGE-L
+        if not prediction or not str(ground_truth):
+            return 0.0
+        return rouge_score(prediction, str(ground_truth))
+
+    elif task_name == 'longdialogue_qa_eng':
+        # Character name match
+        answer = ground_truth[0] if isinstance(ground_truth, list) else ground_truth
+        return 1.0 if answer.lower() in prediction.lower() else 0.0
+
+    elif task_name == 'math_find':
+        # First integer match
+        answer = str(ground_truth).strip()
+        pred_nums = re.split(r"[^0-9]", prediction)
+        for item in pred_nums:
+            if item:
+                return 1.0 if item == answer else 0.0
+        return 0.0
+
+    else:
+        # Fallback: substring match
+        return 1.0 if str(ground_truth).lower() in prediction.lower() else 0.0
+
+
 def math_verify_score(prediction, ground_truth):
     """math_verify metric for MATH500.
 

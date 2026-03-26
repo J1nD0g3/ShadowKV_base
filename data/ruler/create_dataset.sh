@@ -10,9 +10,7 @@
 
 # Model and Tokenizer
 SEQ_LENGTHS=(
-    65536
-    131072
-    262144
+    102400
 )
 
 MODEL_NAME=$1
@@ -42,7 +40,6 @@ fi
 synthetic=(
     "niah_single_1"
     "niah_single_2"
-    "niah_single_3"
     "niah_multikey_1"
     "niah_multikey_2"
     "niah_multivalue"

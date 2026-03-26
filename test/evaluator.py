@@ -125,11 +125,29 @@ class Evaluator:
 
             if sparse_budget_ratio is not None:
                 total_budget = int(input_len * sparse_budget_ratio)
-                # Subtract outlier and local tokens so the total KV matches the ratio
                 kv = llm.kv_cache
-                outlier_tokens = getattr(kv, 'outlier_chunk', 0) * getattr(kv, 'chunk_size', 1)
-                local_tokens = getattr(kv, 'local_chunk', 0) * getattr(kv, 'chunk_size', 1)
-                new_budget = max(total_budget - outlier_tokens - local_tokens, getattr(kv, 'chunk_size', 8))
+                chunk_size = getattr(kv, 'chunk_size', 8)
+                local_tokens = 4 * chunk_size  # local_chunk is always 4
+
+                if llm.attn_mode.lower() == 'shadowkv_cpu':
+                    # ShadowKVCache_CPU: outlier_chunk = (sparse_budget // 1024) * 24
+                    # We need: sparse + outlier_tokens + local_tokens = total_budget
+                    # where outlier_tokens = (sparse // 1024) * 24 * chunk_size
+                    # Solve: s + (s // 1024) * 24 * chunk_size + local_tokens = total
+                    remaining = total_budget - local_tokens
+                    factor = 1.0 + (24 * chunk_size) / 1024.0
+                    sparse_budget = int(remaining / factor)
+                    # Verify and adjust downward if overshoot
+                    actual_outlier = (sparse_budget // 1024) * 24 * chunk_size
+                    while sparse_budget + actual_outlier + local_tokens > total_budget and sparse_budget > chunk_size:
+                        sparse_budget -= chunk_size
+                        actual_outlier = (sparse_budget // 1024) * 24 * chunk_size
+                    new_budget = max(sparse_budget, chunk_size)
+                else:
+                    # ShadowKVCache (GPU): outlier_chunk=48, local_chunk=4 (fixed)
+                    outlier_tokens = getattr(kv, 'outlier_chunk', 0) * chunk_size
+                    new_budget = max(total_budget - outlier_tokens - local_tokens, chunk_size)
+
                 llm.reinit_kv_cache_with_budget(new_budget)
 
             if 'persona' in dataset.dataset_name:
@@ -510,7 +528,98 @@ class Evaluator:
             },
         }
 
-        def _get_metric_name(task_short, groups=LONGBENCH_GROUPS):
+        # InfiniteBench task groups
+        INFINITEBENCH_GROUPS = {
+            'Retrieval': {
+                'tasks': ['passkey', 'number_string', 'kv_retrieval'],
+                'metrics': {
+                    'passkey': 'score',
+                    'number_string': 'score',
+                    'kv_retrieval': 'score',
+                },
+            },
+            'Reading Comp': {
+                'tasks': ['longbook_qa_eng', 'longbook_choice_eng', 'longbook_sum_eng'],
+                'metrics': {
+                    'longbook_qa_eng': 'score',
+                    'longbook_choice_eng': 'score',
+                    'longbook_sum_eng': 'score',
+                },
+            },
+            'Dialogue': {
+                'tasks': ['longdialogue_qa_eng'],
+                'metrics': {
+                    'longdialogue_qa_eng': 'score',
+                },
+            },
+            'Chinese': {
+                'tasks': ['longbook_qa_chn'],
+                'metrics': {
+                    'longbook_qa_chn': 'score',
+                },
+            },
+            'Code': {
+                'tasks': ['code_debug'],
+                'metrics': {
+                    'code_debug': 'score',
+                },
+            },
+            'Math': {
+                'tasks': ['math_find'],
+                'metrics': {
+                    'math_find': 'score',
+                },
+            },
+        }
+
+        # RULER task groups
+        RULER_GROUPS = {
+            'NIAH Single': {
+                'tasks': ['niah_single_1', 'niah_single_2'],
+                'metrics': {
+                    'niah_single_1': 'needle_score',
+                    'niah_single_2': 'needle_score',
+                },
+            },
+            'NIAH Multi': {
+                'tasks': ['niah_multikey_1', 'niah_multikey_2', 'niah_multivalue', 'niah_multiquery'],
+                'metrics': {
+                    'niah_multikey_1': 'needle_score',
+                    'niah_multikey_2': 'needle_score',
+                    'niah_multivalue': 'needle_score',
+                    'niah_multiquery': 'needle_score',
+                },
+            },
+            'Aggregation': {
+                'tasks': ['vt', 'fwe'],
+                'metrics': {
+                    'vt': 'multi_words',
+                    'fwe': 'multi_words',
+                },
+            },
+            'QA': {
+                'tasks': ['qa_1', 'qa_2'],
+                'metrics': {
+                    'qa_1': 'string_match_part',
+                    'qa_2': 'string_match_part',
+                },
+            },
+        }
+
+        # Detect which group definitions to use
+        has_infinitebench = any(s['dataset'].startswith('infinitebench/') for s in self.all_stats)
+        has_ruler = any(s['dataset'].startswith('ruler/') for s in self.all_stats)
+        if has_ruler:
+            active_groups = RULER_GROUPS
+            ds_prefix = 'ruler_'
+        elif has_infinitebench:
+            active_groups = INFINITEBENCH_GROUPS
+            ds_prefix = 'infinitebench_'
+        else:
+            active_groups = LONGBENCH_GROUPS
+            ds_prefix = 'longbench_'
+
+        def _get_metric_name(task_short, groups=active_groups):
             for gname, ginfo in groups.items():
                 if task_short in ginfo['metrics']:
                     return ginfo['metrics'][task_short]
@@ -540,7 +649,7 @@ class Evaluator:
         group_summaries = []
         all_scores_flat = []
 
-        for group_name, group_info in LONGBENCH_GROUPS.items():
+        for group_name, group_info in active_groups.items():
             group_scores = []
             group_stderrs = []
             group_task_lines = []
@@ -558,7 +667,7 @@ class Evaluator:
                 group_scores.append(score)
                 group_stderrs.append(stderr)
 
-                ds_label = f"longbench_{task}"
+                ds_label = f"{ds_prefix}{task}"
                 group_task_lines.append(
                     f"| - {ds_label:<37s}|{0:>6d}|{metric_name:<20s}| ↑ |{score:.4f}| ± |{stderr:.4f}|"
                 )
