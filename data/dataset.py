@@ -22,7 +22,7 @@ import numpy as np
 
 # RULER
 from .metrics import needle_score, string_match_part, multi_number, multi_words
-from .metrics import longbench_metric, math_exact_match, infinitebench_metric
+from .metrics import longbench_metric, longbenchv2_metric, math_exact_match, infinitebench_metric
 
 # NIAH
 from data.utils import generate_random_number, read_context_files, create_contexts, NIAH_TEMPLATE, RANDOM_NEEDLE_CITIES
@@ -83,6 +83,21 @@ LONGBENCH_GEN_LEN = {
     'passage_count': 32, 'passage_retrieval_en': 32, 'passage_retrieval_zh': 32,
     'lcc': 64, 'repobench-p': 64,
 }
+
+# LongBench-v2: 0-shot CoT prompt (ABCD multiple choice)
+LONGBENCHV2_PROMPT = (
+    "Please read the following text and answer the questions below.\n\n"
+    "<text>\n{context}\n</text>\n\n"
+    "What is the correct answer to this question: {question}\n"
+    "Choices:\n"
+    "(A) {choice_A}\n"
+    "(B) {choice_B}\n"
+    "(C) {choice_C}\n"
+    "(D) {choice_D}\n\n"
+    "Let's think step by step:"
+)
+
+LONGBENCHV2_GEN_LEN = 1024  # CoT reasoning needs more tokens
 
 # InfiniteBench prompt templates (yarn_mistral style for open-source models)
 INFINITEBENCH_PROMPTS = {
@@ -243,6 +258,8 @@ class Dataset:
         if self.dataset_name.startswith('infinitebench/'):
             task = self.dataset_name.split('/')[-1]
             base = INFINITEBENCH_GEN_LEN.get(task, 40)
+        elif self.dataset_name == 'longbenchv2':
+            base = LONGBENCHV2_GEN_LEN
         elif self.dataset_name.startswith('longbench/'):
             task = self.dataset_name.split('/')[-1]
             base = LONGBENCH_GEN_LEN.get(task, 64)
@@ -279,6 +296,10 @@ class Dataset:
             def _ib_metric(pred, gt, all_classes=None):
                 return infinitebench_metric(pred, gt, task)
             return _ib_metric
+        elif self.dataset_name == 'longbenchv2':
+            def _lbv2_metric(pred, gt, all_classes=None):
+                return longbenchv2_metric(pred, gt)
+            return _lbv2_metric
         elif self.dataset_name.startswith('longbench/'):
             task = self.dataset_name.split('/')[-1]
             # Return a lambda that captures the task name
@@ -563,6 +584,60 @@ class Dataset:
 
             return tokenized_prompts, gt
 
+        elif self.dataset_name == 'longbenchv2':
+            dataset = load_dataset('THUDM/LongBench-v2', split='train')
+            if self.num_samples > 0:
+                self.num_samples = min(self.num_samples, len(dataset))
+            else:
+                self.num_samples = len(dataset)
+
+            tokenized_prompts = []
+            gt = []
+
+            for i in range(self.num_samples):
+                sample = dataset[i]
+                prompt_text = LONGBENCHV2_PROMPT.format(
+                    context=sample['context'],
+                    question=sample['question'],
+                    choice_A=sample['choice_A'],
+                    choice_B=sample['choice_B'],
+                    choice_C=sample['choice_C'],
+                    choice_D=sample['choice_D'],
+                )
+
+                input_ids = self._apply_chat_template(prompt_text)
+                if input_ids.size(1) > self.datalen:
+                    # Middle truncation on context only
+                    empty_prompt = LONGBENCHV2_PROMPT.format(
+                        context='',
+                        question=sample['question'],
+                        choice_A=sample['choice_A'],
+                        choice_B=sample['choice_B'],
+                        choice_C=sample['choice_C'],
+                        choice_D=sample['choice_D'],
+                    )
+                    overhead_ids = self._apply_chat_template(empty_prompt)
+                    max_ctx_tokens = self.datalen - overhead_ids.size(1)
+                    ctx_ids = self.tokenizer.encode(sample['context'], add_special_tokens=False)
+                    if len(ctx_ids) > max_ctx_tokens:
+                        half = max_ctx_tokens // 2
+                        ctx_ids = ctx_ids[:half] + ctx_ids[-half:]
+                    truncated_ctx = self.tokenizer.decode(ctx_ids, skip_special_tokens=False)
+                    prompt_text = LONGBENCHV2_PROMPT.format(
+                        context=truncated_ctx,
+                        question=sample['question'],
+                        choice_A=sample['choice_A'],
+                        choice_B=sample['choice_B'],
+                        choice_C=sample['choice_C'],
+                        choice_D=sample['choice_D'],
+                    )
+                    input_ids = self._apply_chat_template(prompt_text)
+
+                tokenized_prompts.append(input_ids)
+                gt.append(sample['answer'])  # "A", "B", "C", or "D"
+
+            return tokenized_prompts, gt
+
         elif self.dataset_name.startswith('longbench/'):  # longbench/hotpotqa, longbench/narrativeqa, etc.
             task = self.dataset_name.split('/')[-1]
             assert task in LONGBENCH_PROMPTS, f"Unknown LongBench task: {task}. Available: {list(LONGBENCH_PROMPTS.keys())}"
@@ -622,4 +697,4 @@ class Dataset:
             return tokenized_prompts, gt
 
         else:
-            raise ValueError(f"Dataset {self.dataset_name} not found, please choose from: ruler/*, niah, longbench/*, infinitebench/*, math500")
+            raise ValueError(f"Dataset {self.dataset_name} not found, please choose from: ruler/*, niah, longbench/*, longbenchv2, infinitebench/*, math500")

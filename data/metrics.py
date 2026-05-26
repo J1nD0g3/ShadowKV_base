@@ -417,6 +417,33 @@ def infinitebench_metric(prediction, ground_truth, task_name):
         return 1.0 if str(ground_truth).lower() in prediction.lower() else 0.0
 
 
+# ============================================================
+# LongBench-v2 metrics
+# ============================================================
+
+def longbenchv2_extract_answer(result):
+    """Extract A/B/C/D answer from model output."""
+    result = result.replace('*', '')
+    match = re.search(r'The correct answer is \(([A-D])\)', result)
+    if match:
+        return match.group(1)
+    match = re.search(r'The correct answer is ([A-D])', result)
+    if match:
+        return match.group(1)
+    # Fallback: find last standalone A/B/C/D
+    match = re.findall(r'\b([A-D])\b', result)
+    if match:
+        return match[-1]
+    return None
+
+
+def longbenchv2_metric(prediction, ground_truth):
+    """LongBench-v2 accuracy metric (exact match on A/B/C/D)."""
+    prediction = postprocess_pred(prediction).strip()
+    pred_answer = longbenchv2_extract_answer(prediction)
+    return 1.0 if pred_answer == ground_truth else 0.0
+
+
 def math_verify_score(prediction, ground_truth):
     """math_verify metric for MATH500.
 

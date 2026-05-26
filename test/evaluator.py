@@ -170,6 +170,11 @@ class Evaluator:
                 for (pred, gt, classes) in zip(rets, dataset.gt[i*bsz:(i+1)*bsz], dataset.classes[i*bsz:(i+1)*bsz]):
                     scores.append(max([dataset.metric(pred, g, classes) for g in gt]))
 
+            elif dataset.dataset_name == 'longbenchv2':
+                rets = llm.generate(prompt.to(llm.device), gen_len=gen_len, verbose=False, top_p=1.0, temperature=0.0)
+                for (pred, gt) in zip(rets, dataset.gt[i*bsz:(i+1)*bsz]):
+                    scores.append(dataset.metric(pred, gt))
+
             elif dataset.dataset_name.startswith('longbench/'):
                 rets = llm.generate(prompt.to(llm.device), gen_len=gen_len, verbose=False, top_p=1.0, temperature=0.0)
                 for (pred, gt, classes) in zip(rets, dataset.gt[i*bsz:(i+1)*bsz], dataset.all_classes[i*bsz:(i+1)*bsz]):
@@ -572,6 +577,16 @@ class Evaluator:
             },
         }
 
+        # LongBench-v2 (single dataset, breakdown by domain in sample details)
+        LONGBENCHV2_GROUPS = {
+            'LongBench-v2': {
+                'tasks': ['longbenchv2'],
+                'metrics': {
+                    'longbenchv2': 'accuracy',
+                },
+            },
+        }
+
         # RULER task groups
         RULER_GROUPS = {
             'NIAH Single': {
@@ -609,12 +624,16 @@ class Evaluator:
         # Detect which group definitions to use
         has_infinitebench = any(s['dataset'].startswith('infinitebench/') for s in self.all_stats)
         has_ruler = any(s['dataset'].startswith('ruler/') for s in self.all_stats)
+        has_longbenchv2 = any(s['dataset'] == 'longbenchv2' for s in self.all_stats)
         if has_ruler:
             active_groups = RULER_GROUPS
             ds_prefix = 'ruler_'
         elif has_infinitebench:
             active_groups = INFINITEBENCH_GROUPS
             ds_prefix = 'infinitebench_'
+        elif has_longbenchv2:
+            active_groups = LONGBENCHV2_GROUPS
+            ds_prefix = ''
         else:
             active_groups = LONGBENCH_GROUPS
             ds_prefix = 'longbench_'
