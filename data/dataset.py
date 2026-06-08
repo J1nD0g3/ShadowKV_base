@@ -17,6 +17,7 @@
 
 from datasets import load_dataset
 from termcolor import colored
+import os
 import random
 import numpy as np
 
@@ -281,8 +282,9 @@ class Dataset:
             raise Exception("Gen len not found")
 
         if self.enable_thinking:
-            # Use max_length as upper bound; evaluator will clamp per sample
-            return self.datalen  # large ceiling, evaluator handles actual cap
+            # Thinking budget: cap at 8192 new tokens (think + answer), matching the
+            # LServe/TidalDecode harnesses; evaluator additionally clamps per sample.
+            return min(8192, self.datalen)
         return base
 
     def __getitem__(self, idx):
@@ -446,7 +448,8 @@ class Dataset:
             task = self.dataset_name.split('/')[-1]
             assert task in INFINITEBENCH_PROMPTS, f"Unknown InfiniteBench task: {task}. Available: {list(INFINITEBENCH_PROMPTS.keys())}"
 
-            dataset = load_dataset("json", data_files=f'/home/jheo/data/InfiniteBench/{task}.jsonl', split='train')
+            infinitebench_dir = os.environ.get('INFINITEBENCH_DIR', '/workspace/data/InfiniteBench')
+            dataset = load_dataset("json", data_files=f'{infinitebench_dir}/{task}.jsonl', split='train')
             if self.num_samples > 0:
                 self.num_samples = min(self.num_samples, len(dataset))
             else:

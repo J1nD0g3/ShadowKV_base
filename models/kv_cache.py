@@ -160,7 +160,7 @@ class ShadowKVCache:
             config.num_hidden_layers,
             batch_size,
             config.num_key_value_heads,
-            self.sparse_budget + 4096,
+            self.sparse_budget + 4096 + 8192,  # +8192: decode room for long thinking generations
             self.config.hidden_size // self.config.num_attention_heads,
             device=self.device,
             dtype=self.dtype
@@ -170,7 +170,7 @@ class ShadowKVCache:
             config.num_hidden_layers,
             batch_size,
             config.num_key_value_heads,
-            self.sparse_budget + 4096,
+            self.sparse_budget + 4096 + 8192,  # +8192: decode room for long thinking generations
             self.config.hidden_size // self.config.num_attention_heads,
             device=self.device,
             dtype=self.dtype

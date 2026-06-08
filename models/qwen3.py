@@ -140,11 +140,12 @@ class Qwen3(LLM):
 
         self.init_kv_cache(sparse_budget, rank, chunk_size, self.config)
 
-    def _set_cos_sin_cache(self, inv_freq: torch.Tensor):
+    def _set_cos_sin_cache(self, inv_freq: torch.Tensor, attention_scaling: float = 1.0):
         t = torch.arange(self.max_length, device=self.device, dtype=torch.int64).type_as(inv_freq)
         freqs = torch.outer(t, inv_freq)
         emb = torch.cat((freqs, freqs), dim=-1)
-        return emb.cos().to(self.dtype), emb.sin().to(self.dtype)
+        # attention_scaling: YaRN mscale (HF applies it to cos/sin; 1.0 for default rope)
+        return (emb.cos() * attention_scaling).to(self.dtype), (emb.sin() * attention_scaling).to(self.dtype)
 
     def init_parameters(self):
         hf_model = Qwen3ForCausalLM.from_pretrained(self.model_name, torch_dtype=self.dtype)
@@ -152,7 +153,10 @@ class Qwen3(LLM):
         self.lm_head = hf_model.lm_head.weight.detach().to(self.device)
         self.norm_weight = hf_model.model.norm.weight.detach().to(self.device)
         self.norm_variance_epsilon = hf_model.model.norm.variance_epsilon
-        self.cos_cache, self.sin_cache = self._set_cos_sin_cache(hf_model.model.rotary_emb.inv_freq.to(self.device))
+        self.cos_cache, self.sin_cache = self._set_cos_sin_cache(
+            hf_model.model.rotary_emb.inv_freq.to(self.device),
+            getattr(hf_model.model.rotary_emb, "attention_scaling", 1.0),
+        )
         # cos_sin_cache for ShadowKV decode path (base.py layer_compute)
         self.cos_sin_cache = torch.cat((self.cos_cache[:, :self.head_dim // 2], self.sin_cache[:, :self.head_dim // 2]), dim=-1)
         self.layers :list[Qwen3Layer] = []
@@ -297,8 +301,10 @@ class Qwen3(LLM):
             end = time.time()
             print(f"\nPrefill {input_ids.size(1)} tokens | Generate {n} tokens in {round(end - start, 2)}s, {round(n / (end - start), 2)} tokens/s | cached {self.kv_cache.get_kv_len()}\n")
 
-        # feed new token to the model
-        self.inference(input_ids=next_token, position_ids=self.get_ctx(next_token))
+        # feed new token to the model (skip if the cache/positions are already full,
+        # e.g. thinking mode generating up to max_length exactly)
+        if self.kv_cache.get_kv_len() + next_token.size(1) <= self.max_length - 1:
+            self.inference(input_ids=next_token, position_ids=self.get_ctx(next_token))
 
         gc.collect()
         torch.cuda.empty_cache()

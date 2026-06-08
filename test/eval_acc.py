@@ -118,6 +118,15 @@ if __name__ == '__main__':
         extra_kwargs['enable_thinking'] = args.enable_thinking
     # max_length: datalen * 2 for thinking mode (input + generation), datalen + 2048 otherwise
     max_length = datalen * 2 if args.enable_thinking else datalen + 2048
+    # never exceed the model's positional range (e.g. 131072 for Qwen3 + YaRN x4)
+    try:
+        import json as _json
+        with open(f"{model_name}/config.json") as _f:
+            _max_pos = _json.load(_f).get("max_position_embeddings")
+        if _max_pos:
+            max_length = min(max_length, _max_pos)
+    except (FileNotFoundError, NotADirectoryError):
+        pass
     llm = LLM(model_name=model_name, batch_size=batch_size, device=dist_config.device, max_length=max_length, attn_mode=args.method, dtype=dtype, sparse_budget=sparse_budget, rank=rank, chunk_size=chunk_size, minference=minference, **extra_kwargs)
 
     if dist_config.master_process:

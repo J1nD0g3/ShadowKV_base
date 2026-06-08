@@ -110,13 +110,36 @@ class Evaluator:
         sample_details = []      # Per-sample details
         task_start_time = time.time()
 
-        # clear the file
-        open(output_path, 'w').close()
+        # clear the file (unless resuming: SHADOWKV_RESUME=1 keeps existing results and skips them)
+        resume_batches = 0
+        if os.environ.get('SHADOWKV_RESUME') == '1' and os.path.exists(output_path):
+            import json as _json
+            with open(output_path) as _f:
+                for _line in _f:
+                    try:
+                        _rec = _json.loads(_line)
+                        # NOTE: the per-line 'correct' field is a CUMULATIVE running list
+                        # (repo design); the score for THIS batch is its last element only.
+                        _c = _rec.get('correct', _rec.get('score'))
+                        if isinstance(_c, list):
+                            scores.append(_c[-1] if _c else 0.0)
+                        elif _c is not None:
+                            scores.append(_c)
+                        resume_batches += 1
+                    except _json.JSONDecodeError:
+                        pass
+            if self.dist_config.master_process and resume_batches:
+                print(colored(f"[Resume] skipping {resume_batches} completed batches in {output_path}", 'yellow'))
+        else:
+            open(output_path, 'w').close()
         if self.dist_config.is_distributed:
             dist.barrier()
 
         progress_bar = tqdm(range(dataset.num_samples // bsz), desc=f'Running {dataset.dataset_name}', disable=self.dist_config.is_distributed and not self.dist_config.master_process, ascii=' ░▒█', ncols=120)
         for i in range(dataset.num_samples // bsz):
+            if i < resume_batches:
+                progress_bar.update(1)
+                continue
             prompt = torch.cat([dataset.tokenized_prompts[i*bsz+j] for j in range(bsz)], dim=0)
             input_len = prompt.size(1)
             # Dynamic gen_len: use remaining capacity up to dataset default

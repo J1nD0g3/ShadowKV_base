@@ -25,7 +25,13 @@ import torch
 from torch.nn import functional as F
 
 from flashinfer.norm import rmsnorm
-from minference import vertical_slash_sparse_attention, block_sparse_attention, streaming_forward
+try:
+    from minference import vertical_slash_sparse_attention, block_sparse_attention, streaming_forward
+except ImportError:
+    # minference is only needed for the minference attention pattern mode
+    def _minference_unavailable(*args, **kwargs):
+        raise ImportError("minference is not installed; minference attention mode is unavailable")
+    vertical_slash_sparse_attention = block_sparse_attention = streaming_forward = _minference_unavailable
 
 from kernels import shadowkv
 
