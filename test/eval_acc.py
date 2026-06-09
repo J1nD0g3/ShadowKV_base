@@ -135,7 +135,10 @@ if __name__ == '__main__':
     for dataset_name in dataset_names:
         dataset = Dataset(dataset_name, llm.tokenizer, datalen, num_samples, evaluator.dist_config.rank, evaluator.dist_config.world_size, enable_thinking=args.enable_thinking, disable_chat_template=args.disable_chat_template)
         budget_label = f"ratio{args.sparse_budget_ratio}" if args.sparse_budget_ratio else str(sparse_budget)
-        evaluator.test(llm, dataset, f"archive/{model_name.split('/')[-1]}/{dataset_name}_{datalen}_{args.method}_{budget_label}_{rank}_{chunk_size}.jsonl", args.method, sparse_budget_ratio=args.sparse_budget_ratio)
+        # output dir override (collect all results under /workspace/logs); falls back to repo archive/
+        _out_base = os.environ.get("SHADOWKV_OUT_DIR", f"archive/{model_name.split('/')[-1]}")
+        _out_path = f"{_out_base}/{dataset_name}_{datalen}_{args.method}_{budget_label}_{rank}_{chunk_size}.jsonl"
+        evaluator.test(llm, dataset, _out_path, args.method, sparse_budget_ratio=args.sparse_budget_ratio)
     
     del llm
     gc.collect()

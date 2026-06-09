@@ -98,7 +98,7 @@ LONGBENCHV2_PROMPT = (
     "Let's think step by step:"
 )
 
-LONGBENCHV2_GEN_LEN = 1024  # CoT reasoning needs more tokens
+LONGBENCHV2_GEN_LEN = 4096  # CoT reasoning needs more tokens (matched max_gen=4096 across all 3 methods)
 
 # InfiniteBench prompt templates (yarn_mistral style for open-source models)
 INFINITEBENCH_PROMPTS = {
